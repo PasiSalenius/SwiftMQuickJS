@@ -22,7 +22,7 @@ Add SwiftMQuickJS to your Swift package dependencies:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/yourusername/SwiftMQuickJS", from: "1.0.0")
+    .package(url: "https://github.com/PasiSalenius/SwiftMQuickJS", from: "1.0.0")
 ]
 ```
 
