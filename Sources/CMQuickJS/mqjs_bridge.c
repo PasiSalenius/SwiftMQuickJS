@@ -12,6 +12,40 @@ JSValue js_swift_trampoline(JSContext *ctx, JSValue *this_val, int argc, JSValue
 
 #include "mqjs_stdlib.h"
 
+/* ============================================================================
+ * Native Function Binding Support
+ * ============================================================================ */
+
+/*
+ * Callback type for Swift to handle native function calls.
+ *
+ * Parameters:
+ *   - opaque: The context opaque pointer (Swift context reference)
+ *   - function_id: The ID of the registered Swift function
+ *   - argc: Number of arguments
+ *   - argv: Array of JSValue arguments
+ *
+ * Returns: JSValue result (or JS_EXCEPTION on error)
+ */
+typedef JSValue (*MQJSNativeCallback)(void *opaque, int32_t function_id,
+                                       int argc, JSValue *argv);
+
+/* Global callback - set by Swift during context initialization */
+static MQJSNativeCallback g_native_callback = NULL;
+
+/* Set the native callback handler (called from Swift) */
+void mqjs_set_native_callback(MQJSNativeCallback callback) {
+    g_native_callback = callback;
+}
+
+/* Get function ID from params object */
+static int32_t get_function_id_from_params(JSContext *ctx, JSValue params) {
+    /* params is a JS number containing the function ID */
+    int32_t func_id = 0;
+    JS_ToInt32(ctx, &func_id, params);
+    return func_id;
+}
+
 /* Helper functions to access C macros and constants from Swift */
 JSValue mqjs_get_undefined(void) {
     return JS_UNDEFINED;
@@ -128,16 +162,61 @@ JSValue js_performance_now(JSContext *ctx, JSValue *this_val,
     return JS_NewFloat64(ctx, d);
 }
 
-/* Swift function trampoline - NOT YET IMPLEMENTED */
-/* Placeholder for future native function binding support */
+/*
+ * Swift function trampoline - called when JavaScript invokes a native function.
+ *
+ * This function extracts the function ID from params, retrieves the context
+ * opaque pointer, and calls the Swift callback handler.
+ */
 JSValue js_swift_trampoline(JSContext *ctx, JSValue *this_val,
                             int argc, JSValue *argv, JSValue params)
 {
-    return JS_ThrowReferenceError(ctx, "Native function binding not yet implemented");
+    if (!g_native_callback) {
+        return JS_ThrowInternalError(ctx, "Native callback not initialized");
+    }
+
+    /* Get the function ID from params */
+    int32_t func_id = get_function_id_from_params(ctx, params);
+
+    /* Get the Swift context reference from context opaque */
+    void *opaque = JS_GetContextOpaque(ctx);
+
+    /* Call Swift handler */
+    return g_native_callback(opaque, func_id, argc, argv);
 }
 
 /* Helper to get the Swift trampoline function index */
 int32_t mqjs_get_swift_trampoline_index(void) {
     /* The trampoline is at index 147 in c_function_table */
     return 147;
+}
+
+/* Create a native function bound to a Swift closure */
+JSValue mqjs_new_native_function(JSContext *ctx, int32_t function_id) {
+    /* Create params value containing the function ID */
+    JSValue params = JS_NewInt32(ctx, function_id);
+
+    /* Create the C function with params */
+    int32_t trampoline_idx = mqjs_get_swift_trampoline_index();
+    return JS_NewCFunctionParams(ctx, trampoline_idx, params);
+}
+
+/* Get context opaque pointer */
+void *mqjs_get_context_opaque(JSContext *ctx) {
+    return JS_GetContextOpaque(ctx);
+}
+
+/* Set context opaque pointer */
+void mqjs_set_context_opaque(JSContext *ctx, void *opaque) {
+    JS_SetContextOpaque(ctx, opaque);
+}
+
+/* Helper to get JS_EXCEPTION value (macro not accessible from Swift) */
+JSValue mqjs_get_exception(void) {
+    return JS_EXCEPTION;
+}
+
+/* Helper to throw an internal error (macro not accessible from Swift) */
+JSValue mqjs_throw_internal_error(JSContext *ctx, const char *message) {
+    return JS_ThrowInternalError(ctx, "%s", message);
 }
