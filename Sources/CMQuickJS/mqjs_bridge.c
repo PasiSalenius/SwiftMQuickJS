@@ -24,11 +24,12 @@ JSValue js_swift_trampoline(JSContext *ctx, JSValue *this_val, int argc, JSValue
  *   - function_id: The ID of the registered Swift function
  *   - argc: Number of arguments
  *   - argv: Array of JSValue arguments
+ *   - this_val: The 'this' value for method calls
  *
  * Returns: JSValue result (or JS_EXCEPTION on error)
  */
 typedef JSValue (*MQJSNativeCallback)(void *opaque, int32_t function_id,
-                                       int argc, JSValue *argv);
+                                       int argc, JSValue *argv, JSValue this_val);
 
 /* Global callback - set by Swift during context initialization */
 static MQJSNativeCallback g_native_callback = NULL;
@@ -181,8 +182,8 @@ JSValue js_swift_trampoline(JSContext *ctx, JSValue *this_val,
     /* Get the Swift context reference from context opaque */
     void *opaque = JS_GetContextOpaque(ctx);
 
-    /* Call Swift handler */
-    return g_native_callback(opaque, func_id, argc, argv);
+    /* Call Swift handler with this_val for method calls */
+    return g_native_callback(opaque, func_id, argc, argv, *this_val);
 }
 
 /* Helper to get the Swift trampoline function index */
@@ -219,4 +220,20 @@ JSValue mqjs_get_exception(void) {
 /* Helper to throw an internal error (macro not accessible from Swift) */
 JSValue mqjs_throw_internal_error(JSContext *ctx, const char *message) {
     return JS_ThrowInternalError(ctx, "%s", message);
+}
+
+/* Set the prototype of an object using Object.setPrototypeOf semantics */
+int mqjs_set_prototype(JSContext *ctx, JSValue obj, JSValue proto) {
+    /* Use js_object_setPrototypeOf which takes (ctx, this_val, argc, argv) */
+    JSValue argv[2];
+    argv[0] = obj;
+    argv[1] = proto;
+    JSValue result = js_object_setPrototypeOf(ctx, NULL, 2, argv);
+
+    /* Check if it threw an exception */
+    if (JS_IsException(result)) {
+        return -1;
+    }
+
+    return 0;
 }

@@ -32,7 +32,7 @@ int32_t mqjs_get_swift_trampoline_index(void);
 
 /* Callback type for Swift to handle native function calls */
 typedef JSValue (*MQJSNativeCallback)(void *opaque, int32_t function_id,
-                                       int argc, JSValue *argv);
+                                       int argc, JSValue *argv, JSValue this_val);
 
 /* Set the native callback handler (called once from Swift during init) */
 void mqjs_set_native_callback(MQJSNativeCallback callback);
@@ -49,5 +49,8 @@ JSValue mqjs_get_exception(void);
 
 /* Helper to throw an internal error (macro not accessible from Swift) */
 JSValue mqjs_throw_internal_error(JSContext *ctx, const char *message);
+
+/* Set the prototype of an object */
+int mqjs_set_prototype(JSContext *ctx, JSValue obj, JSValue proto);
 
 #endif /* MQJS_BRIDGE_H */

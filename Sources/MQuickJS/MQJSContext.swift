@@ -63,6 +63,14 @@ public final class MQJSContext {
     /// Counter for generating unique function IDs
     private var nextFunctionId: Int32 = 0
 
+    // MARK: - Custom Class Registration
+
+    /// Registry of Swift object instances keyed by instance ID
+    private var instanceRegistry: [Int32: AnyObject] = [:]
+
+    /// Counter for generating unique instance IDs
+    private var nextInstanceId: Int32 = 0
+
     /// Static registry to look up context by opaque pointer
     /// This is needed because C callbacks can't capture Swift context
     private static var contextRegistry: [UnsafeMutableRawPointer: MQJSContext] = [:]
@@ -136,7 +144,7 @@ public final class MQJSContext {
     }
 
     /// Static callback handler for native function calls from C
-    private static let nativeCallbackHandler: MQJSNativeCallback = { opaque, functionId, argc, argv in
+    private static let nativeCallbackHandler: MQJSNativeCallback = { opaque, functionId, argc, argv, thisVal in
         guard let opaque = opaque else {
             return mqjs_get_exception()
         }
@@ -150,7 +158,7 @@ public final class MQJSContext {
             return mqjs_get_exception()
         }
 
-        return context.handleNativeCall(functionId: functionId, argc: argc, argv: argv)
+        return context.handleNativeCall(functionId: functionId, argc: argc, argv: argv, thisVal: thisVal)
     }
 
     /// Register this context in the static registry
@@ -189,6 +197,9 @@ public final class MQJSContext {
         // Clear native functions
         nativeFunctions.removeAll()
 
+        // Clear instance registry (Swift ARC will deallocate objects)
+        instanceRegistry.removeAll()
+
         // Invalidate all live values first
         for value in liveValues.allObjects {
             value.invalidate()
@@ -204,7 +215,7 @@ public final class MQJSContext {
     // MARK: - Native Function Handling
 
     /// Handle a native function call from JavaScript
-    private func handleNativeCall(functionId: Int32, argc: Int32, argv: UnsafeMutablePointer<JSValue>?) -> JSValue {
+    private func handleNativeCall(functionId: Int32, argc: Int32, argv: UnsafeMutablePointer<JSValue>?, thisVal: JSValue) -> JSValue {
         // Look up the function
         guard let function = nativeFunctions[functionId] else {
             _ = mqjs_throw_internal_error(ctx, "Native function not found")
@@ -219,6 +230,10 @@ public final class MQJSContext {
                 args.append(MQJSValue(context: self, jsValue: jsValue))
             }
         }
+
+        // Store thisVal for method calls that need it
+        let thisValue = MQJSValue(context: self, jsValue: thisVal)
+        currentThisValue = thisValue
 
         // Call the Swift function
         do {
@@ -243,6 +258,9 @@ public final class MQJSContext {
             return mqjs_get_exception()
         }
     }
+
+    /// Current 'this' value during native function calls (for method binding)
+    internal var currentThisValue: MQJSValue?
 
     /// Convert a Swift value to MQJSValue
     private func convertToJSValue(_ value: Any) throws -> MQJSValue {
@@ -278,6 +296,26 @@ public final class MQJSContext {
         default:
             throw MQJSError.typeConversionError("Cannot convert \(type(of: value)) to JavaScript value")
         }
+    }
+
+    // MARK: - Instance Registry (Internal)
+
+    /// Register a Swift object instance and return its ID
+    internal func registerInstance(_ instance: AnyObject) -> Int32 {
+        let instanceId = nextInstanceId
+        nextInstanceId += 1
+        instanceRegistry[instanceId] = instance
+        return instanceId
+    }
+
+    /// Retrieve a Swift object instance by ID
+    internal func getInstance<T: AnyObject>(_ instanceId: Int32, as type: T.Type) -> T? {
+        return instanceRegistry[instanceId] as? T
+    }
+
+    /// Remove an instance from the registry
+    internal func removeInstance(_ instanceId: Int32) {
+        instanceRegistry.removeValue(forKey: instanceId)
     }
 
     // MARK: - Value Tracking (Internal)
@@ -508,6 +546,178 @@ public final class MQJSContext {
 
         let jsFunctionValue = MQJSValue(context: self, jsValue: jsFunction)
         object[name] = jsFunctionValue
+    }
+
+    // MARK: - Custom Class Registration
+
+    /// Hidden property name for storing instance IDs on JavaScript objects
+    private static let instanceIdProperty = "__swiftInstanceId__"
+
+    /// Registers a Swift class that can be instantiated from JavaScript.
+    ///
+    /// Use the builder to define the constructor and methods for the class.
+    /// Once registered, JavaScript code can use `new ClassName(args)` to create
+    /// instances and call methods on them.
+    ///
+    /// ```swift
+    /// class Counter {
+    ///     var value: Int
+    ///     init(start: Int) { self.value = start }
+    ///     func increment() { value += 1 }
+    ///     func getValue() -> Int { return value }
+    /// }
+    ///
+    /// try context.registerClass("Counter") { builder in
+    ///     builder.constructor { args in
+    ///         let start = try args.first?.toInt32() ?? 0
+    ///         return Counter(start: Int(start))
+    ///     }
+    ///     builder.method("increment") { this, args in
+    ///         this.increment()
+    ///         return nil
+    ///     }
+    ///     builder.method("getValue") { this, args in
+    ///         return this.getValue()
+    ///     }
+    /// }
+    ///
+    /// let result = try context.eval("""
+    ///     let c = new Counter(10);
+    ///     c.increment();
+    ///     c.getValue();  // 11
+    /// """)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - name: The class name as it appears in JavaScript
+    ///   - configure: A closure that receives a builder to define the class
+    /// - Throws: MQJSError if registration fails
+    public func registerClass<T: AnyObject>(_ name: String, configure: (MQJSClassBuilder<T>) -> Void) throws {
+        try checkValid()
+
+        // Create and configure the builder
+        let builder = MQJSClassBuilder<T>()
+        configure(builder)
+
+        // Ensure constructor is defined
+        guard let constructorFn = builder.constructorFn else {
+            throw MQJSError.classRegistrationError("Constructor not defined for class '\(name)'")
+        }
+
+        // Create the prototype object with methods
+        let prototypeJs = JS_NewObject(ctx)
+        let prototype = MQJSValue(context: self, jsValue: prototypeJs)
+
+        // Register each method on the prototype
+        for (methodName, methodFn) in builder.methods {
+            try registerMethod(methodName, on: prototype, for: T.self, methodFn)
+        }
+
+        // Create a native function that initializes instances
+        let initFunctionName = "__\(name)_init__"
+        let initFunctionId = nextFunctionId
+        nextFunctionId += 1
+
+        // The init function receives 'this' and sets it up
+        nativeFunctions[initFunctionId] = { [weak self] args in
+            guard let self = self else {
+                throw MQJSError.invalidContext
+            }
+
+            // 'this' is available via currentThisValue
+            guard let thisValue = self.currentThisValue else {
+                throw MQJSError.nativeFunctionError("Constructor called without 'this' context")
+            }
+
+            // Call the Swift constructor
+            let instance = try constructorFn(args)
+
+            // Register the instance and get its ID
+            let instanceId = self.registerInstance(instance)
+
+            // Store the instance ID on 'this'
+            thisValue[Self.instanceIdProperty] = try Int32(instanceId).toJSValue(in: self)
+
+            return nil
+        }
+
+        // Create the native init function
+        let initFunctionJs = mqjs_new_native_function(ctx, initFunctionId)
+        if JS_IsException(initFunctionJs) != 0 {
+            nativeFunctions.removeValue(forKey: initFunctionId)
+            throw try extractError()
+        }
+
+        // Set the init function on global (temporarily)
+        let initFunctionValue = MQJSValue(context: self, jsValue: initFunctionJs)
+        globalObject[initFunctionName] = initFunctionValue
+
+        // Create a JavaScript constructor function that calls our init function
+        // and set up the prototype
+        let constructorScript = """
+            (function() {
+                function \(name)() {
+                    \(initFunctionName).apply(this, arguments);
+                }
+                return \(name);
+            })()
+        """
+
+        let constructorValue = try eval(constructorScript)
+
+        // Set the prototype with methods on the constructor
+        constructorValue["prototype"] = prototype
+
+        // Set the constructor on the global object
+        globalObject[name] = constructorValue
+    }
+
+    /// Register a method on a prototype object
+    private func registerMethod<T: AnyObject>(
+        _ name: String,
+        on prototype: MQJSValue,
+        for type: T.Type,
+        _ method: @escaping MQJSClassBuilder<T>.Method
+    ) throws {
+        let methodId = nextFunctionId
+        nextFunctionId += 1
+
+        nativeFunctions[methodId] = { [weak self] args in
+            guard let self = self else {
+                throw MQJSError.invalidContext
+            }
+
+            // Get 'this' from the current call
+            guard let thisValue = self.currentThisValue else {
+                throw MQJSError.nativeFunctionError("Method called without 'this' context")
+            }
+
+            // Get the instance ID from 'this'
+            guard let instanceIdValue = thisValue[Self.instanceIdProperty],
+                  !instanceIdValue.isUndefined else {
+                throw MQJSError.nativeFunctionError("Method called on object without instance ID")
+            }
+
+            let instanceId = try instanceIdValue.toInt32()
+
+            // Look up the Swift instance
+            guard let instance = self.getInstance(instanceId, as: type) else {
+                throw MQJSError.nativeFunctionError("Swift instance not found for ID \(instanceId)")
+            }
+
+            // Call the method
+            return try method(instance, args)
+        }
+
+        // Create the method function
+        let methodJs = mqjs_new_native_function(ctx, methodId)
+        if JS_IsException(methodJs) != 0 {
+            nativeFunctions.removeValue(forKey: methodId)
+            throw try extractError()
+        }
+
+        let methodValue = MQJSValue(context: self, jsValue: methodJs)
+        prototype[name] = methodValue
     }
 
     // MARK: - JSC Compatibility
