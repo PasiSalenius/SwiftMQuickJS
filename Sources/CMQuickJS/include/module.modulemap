@@ -1,0 +1,6 @@
+module CMQuickJS {
+    header "mquickjs.h"
+    header "mqjs_stdlib.h"
+    header "mqjs_bridge.h"
+    export *
+}
