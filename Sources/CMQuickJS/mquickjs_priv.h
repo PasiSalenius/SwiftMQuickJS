@@ -259,20 +259,4 @@ JSValue js_regexp_get_flags(JSContext *ctx, JSValue *this_val,
 JSValue js_regexp_exec(JSContext *ctx, JSValue *this_val,
                        int argc, JSValue *argv, int is_test);
 
-/* Bridge functions (implemented in mqjs_bridge.c) */
-JSValue js_date_now(JSContext *ctx, JSValue *this_val,
-                    int argc, JSValue *argv);
-JSValue js_print(JSContext *ctx, JSValue *this_val,
-                 int argc, JSValue *argv);
-JSValue js_load(JSContext *ctx, JSValue *this_val,
-                int argc, JSValue *argv);
-JSValue js_setTimeout(JSContext *ctx, JSValue *this_val,
-                      int argc, JSValue *argv);
-JSValue js_clearTimeout(JSContext *ctx, JSValue *this_val,
-                        int argc, JSValue *argv);
-JSValue js_gc(JSContext *ctx, JSValue *this_val,
-              int argc, JSValue *argv);
-JSValue js_performance_now(JSContext *ctx, JSValue *this_val,
-                           int argc, JSValue *argv);
-
 #endif /* MICROJS_PRIV_H */
